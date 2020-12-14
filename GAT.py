@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 import os
 from torchsummary import summary
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = 'cpu'
 # %%
 # define dataset
 
@@ -93,7 +94,7 @@ class MultiGATLayer(nn.Module):
         self.num_heads = num_heads
         self.W = [nn.Linear(f_in, f_out).to(device)
                   for _ in range(self.num_heads)]
-        self.a = [nn.Linear(f_in*2, 1).to(device)
+        self.a = [nn.Linear(f_out*2, 1).to(device)
                   for _ in range(self.num_heads)]
         self.softmax = nn.Softmax().to(device)
         self.leakyrelu = nn.LeakyReLU(0.2).to(device)
@@ -105,11 +106,11 @@ class MultiGATLayer(nn.Module):
             neighbors.append(node)
             node_features = [features[neighbor] for neighbor in neighbors]
             node_features = torch.tensor(
-                torch.stack(node_features), dtype=torch.float32)
+                torch.stack(node_features), dtype=torch.float32).to(device)
             attentionkey = [self.W[i](node_features)
                             for i in range(self.num_heads)]
             transformed_features = torch.zeros(
-                self.num_heads, len(neighbors), self.f_in*2)
+                self.num_heads, len(neighbors), self.f_out*2).to(device)
             for k in range(self.num_heads):
                 for i in range(len(neighbors)):
                     row = torch.cat(
@@ -136,9 +137,12 @@ class MultiGAT(nn.Module):
         self.f_in = f_in
         self.f_out = f_out
         self.num_layers = num_layers
-        self.GATlayers = [MultiGATLayer(f_in, f_out, num_heads)
-                          for _ in range(num_layers)]
-        self.relu = nn.ReLU()
+        self.GATlayers = []
+        for i in range(num_layers):
+            self.GATlayers.append(MultiGATLayer(
+                f_in, f_out, num_heads).to(device))
+            f_in = f_out*num_heads
+        self.att_activation = nn.LeakyReLU(0.1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, adjlist, features):
@@ -146,19 +150,13 @@ class MultiGAT(nn.Module):
         for i in range(self.num_layers):
             hidden_features = self.GATlayers[i](adjlist, hidden_features)
             if(i < self.num_layers):
-                hidden_features = self.relu(hidden_features)
+                hidden_features = self.att_activation(hidden_features)
         output = self.sigmoid(hidden_features.mean(axis=1))
         return output
 
 
 # %%
-model = MultiGAT(165, 165, 1, 2).to(device)
-# %%
-
-# %%
-# training
-EPOCH = 3
-criterion = nn.BCELoss()
+model = MultiGAT(165, 84, 2, 4).to(device)
 paralist = []
 for layer in model.GATlayers:
     for p in layer.a:
@@ -166,44 +164,83 @@ for layer in model.GATlayers:
     for p in layer.W:
         paralist.append({'params': p.parameters()})
 optimizer = torch.optim.Adam(paralist, lr=0.001)
-for epoch in range(EPOCH):
-    total_acc = 0
-    total_num = 0
 
-    for timestep in range(len(dataset.timestepidx)):
-        num = 0
+
+class WeightedBCELoss(nn.Module):
+    def __init__(self, weighted):
+        super(WeightedBCELoss, self).__init__()
+        self.BCELoss = nn.BCELoss()
+        self.weighted = weighted
+
+    def forward(self, y_pred, y_label):
+        loss = self.BCELoss(y_pred, y_label)
+        return (self.weighted*y_label+1-y_label)*loss
+
+
+criterion = WeightedBCELoss(10)
+# %%
+# training
+traininglen = int(len(dataset.timestepidx)*0.6)
+EPOCH = 5
+for epoch in range(EPOCH):
+    total_positive = 0
+    total_negative = 0
+    total_true_positive = 0
+    total_false_positive = 0
+    total_acc = 0
+    for timestep in range(traininglen):
+        positive = 0
+        negative = 0
+        true_positive = 0
+        false_positive = 0
         loss = 0
         acc = 0
         start = dataset.timestepidx[timestep]
         try:
             end = dataset.timestepidx[timestep+1]
         except:
-            end = len(dataset.timestepidx)
+            end = len(dataset.features)
         output = model(dataset.adjlist[timestep],
                        dataset.features[start:end].to(device))
         for idx, label in enumerate(dataset.label[timestep]):
             if (label == 1):
                 loss += criterion(output[idx],
-                                  torch.tensor((0), dtype=torch.float32))
-                num += 1
-                total_num += 1
-                if(output[idx] < 0.5):
+                                  torch.tensor((1), dtype=torch.float32))
+                positive += 1
+                if(output[idx] >= 0.5):
                     acc += 1
-                    total_acc += 1
+                    true_positive += 1
+
             elif (label == 2):
                 loss += criterion(output[idx],
-                                  torch.tensor((1), dtype=torch.float32))
-                num += 1
-                total_num += 1
-                if(output[idx] > 0.5):
+                                  torch.tensor((0), dtype=torch.float32))
+                negative += 1
+                if(output[idx] < 0.5):
                     acc += 1
-                    total_acc += 1
-        loss /= num
+                else:
+                    false_positive += 1
+        total_acc += acc
+        total_positive += positive
+        total_negative += negative
+        total_true_positive += true_positive
+        total_false_positive += false_positive
+        loss /= negative+positive
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        print(f"[{timestep+1}/49] loss={loss} acc={acc}/{num}={acc/num}")
-    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/total_num}")
+        recall = true_positive/positive
+        try:
+            precision = true_positive/(true_positive+false_positive)
+            f1 = 2/(1/precision+1/recall)
+        except:
+            precision = 0
+            f1 = 0
+        print(
+            f"[{timestep+1}/49] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    precision = total_true_positive/(total_true_positive+total_false_positive)
+    recall = total_true_positive/total_positive
+    f1 = 2/(1/precision+1/recall)
+    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
 
 # %%
 pickle.dump(model, "./models/test_model.pkl")

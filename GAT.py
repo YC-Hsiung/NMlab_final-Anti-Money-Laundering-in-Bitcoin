@@ -1,5 +1,6 @@
 # %%
 # import packages
+import time
 import pickle
 import matplotlib.pyplot as plt
 import torch
@@ -21,7 +22,7 @@ class elliptic_dataset(torch.utils.data.Dataset):
         feature_path = os.path.join(path, "elliptic_txs_features.csv")
         df = pd.read_csv(feature_path, header=None)
         fdf = df.to_numpy()
-        num_features = 165
+        num_features = 93
         self.features = torch.zeros(
             (len(fdf), num_features), dtype=torch.float32)
         self.timestepidx = []
@@ -31,7 +32,8 @@ class elliptic_dataset(torch.utils.data.Dataset):
                 current_time += 1
                 self.timestepidx.append(i)
 
-            self.features[i] = torch.tensor(feature[2:], dtype=torch.float32)
+            self.features[i] = torch.tensor(
+                feature[2:num_features+2], dtype=torch.float32)
         print("features read!")
         # read classes
         class_path = os.path.join(path, "elliptic_txs_classes.csv")
@@ -100,17 +102,18 @@ class MultiGATLayer(nn.Module):
         self.leakyrelu = nn.LeakyReLU(0.2).to(device)
 
     def forward(self, adjlist, features):
-        output_features = torch.zeros(len(features), self.f_out*self.num_heads)
+        output_features = torch.zeros(
+            len(features), self.f_out*self.num_heads, device=device)
         for node in range(len(features)):
             neighbors = adjlist[node].copy()
             neighbors.append(node)
             node_features = [features[neighbor] for neighbor in neighbors]
             node_features = torch.tensor(
-                torch.stack(node_features), dtype=torch.float32).to(device)
+                torch.stack(node_features), dtype=torch.float32, device=device)
             attentionkey = [self.W[i](node_features)
                             for i in range(self.num_heads)]
             transformed_features = torch.zeros(
-                self.num_heads, len(neighbors), self.f_out*2).to(device)
+                self.num_heads, len(neighbors), self.f_out*2, device=device)
             for k in range(self.num_heads):
                 for i in range(len(neighbors)):
                     row = torch.cat(
@@ -156,7 +159,7 @@ class MultiGAT(nn.Module):
 
 
 # %%
-model = MultiGAT(165, 84, 2, 4).to(device)
+model = MultiGAT(93, 40, 4, 6).to(device)
 paralist = []
 for layer in model.GATlayers:
     for p in layer.a:
@@ -177,10 +180,11 @@ class WeightedBCELoss(nn.Module):
         return (self.weighted*y_label+1-y_label)*loss
 
 
-criterion = WeightedBCELoss(10)
+criterion = WeightedBCELoss(7.5)
 # %%
 # training
 traininglen = int(len(dataset.timestepidx)*0.6)
+traininglen = 10
 EPOCH = 5
 for epoch in range(EPOCH):
     total_positive = 0
@@ -189,6 +193,7 @@ for epoch in range(EPOCH):
     total_false_positive = 0
     total_acc = 0
     for timestep in range(traininglen):
+        starttime = time.time()
         positive = 0
         negative = 0
         true_positive = 0
@@ -205,7 +210,7 @@ for epoch in range(EPOCH):
         for idx, label in enumerate(dataset.label[timestep]):
             if (label == 1):
                 loss += criterion(output[idx],
-                                  torch.tensor((1), dtype=torch.float32))
+                                  torch.tensor((1), dtype=torch.float32, device=device))
                 positive += 1
                 if(output[idx] >= 0.5):
                     acc += 1
@@ -213,7 +218,7 @@ for epoch in range(EPOCH):
 
             elif (label == 2):
                 loss += criterion(output[idx],
-                                  torch.tensor((0), dtype=torch.float32))
+                                  torch.tensor((0), dtype=torch.float32, device=device))
                 negative += 1
                 if(output[idx] < 0.5):
                     acc += 1
@@ -236,13 +241,15 @@ for epoch in range(EPOCH):
             precision = 0
             f1 = 0
         print(
-            f"[{timestep+1}/49] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+            f"[{timestep+1}/{traininglen}] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} time={time.time()-starttime:.4f}")
     precision = total_true_positive/(total_true_positive+total_false_positive)
     recall = total_true_positive/total_positive
     f1 = 2/(1/precision+1/recall)
     print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
 
 # %%
-pickle.dump(model, "./models/test_model.pkl")
+torch.save(model, "./models/test_model.bin")
 
+# %%
+model = torch.load("./models/test_model.bin")
 # %%

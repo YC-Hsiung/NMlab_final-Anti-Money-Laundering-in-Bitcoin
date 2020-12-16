@@ -8,9 +8,10 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 import numpy as np
 import pandas as pd
+import random
 import os
 from torchsummary import summary
-#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = 'cpu'
 # %%
 # define dataset
@@ -72,6 +73,9 @@ class elliptic_dataset(torch.utils.data.Dataset):
             self.adjlist[current_time-1][self.IdToidx[id1] -
                                          self.timestepidx[current_time-1]].append(self.IdToidx[id2] -
                                                                                   self.timestepidx[current_time-1])
+            self.adjlist[current_time-1][self.IdToidx[id2] -
+                                         self.timestepidx[current_time-1]].append(self.IdToidx[id1] -
+                                                                                  self.timestepidx[current_time-1])
         print("edge read!")
 
     def __getitem__(self, idx):
@@ -94,12 +98,14 @@ class MultiGATLayer(nn.Module):
         self.f_in = f_in
         self.f_out = f_out
         self.num_heads = num_heads
-        self.W = [nn.Linear(f_in, f_out).to(device)
-                  for _ in range(self.num_heads)]
-        self.a = [nn.Linear(f_out*2, 1).to(device)
-                  for _ in range(self.num_heads)]
-        self.softmax = nn.Softmax().to(device)
-        self.leakyrelu = nn.LeakyReLU(0.2).to(device)
+        self.W=nn.ModuleList()
+        self.a=nn.ModuleList()
+        for _ in range(self.num_heads):
+            self.W.append(nn.Linear(f_in, f_out))
+        for _ in range(self.num_heads):
+            self.a.append(nn.Linear(f_out*2, 1))
+        self.leakyrelu = nn.LeakyReLU(0.2)
+        self.softmax = nn.Softmax()
 
     def forward(self, adjlist, features):
         output_features = torch.zeros(
@@ -108,8 +114,7 @@ class MultiGATLayer(nn.Module):
             neighbors = adjlist[node].copy()
             neighbors.append(node)
             node_features = [features[neighbor] for neighbor in neighbors]
-            node_features = torch.tensor(
-                torch.stack(node_features), dtype=torch.float32, device=device)
+            node_features = torch.stack(node_features).clone().detach().to(device)
             attentionkey = [self.W[i](node_features)
                             for i in range(self.num_heads)]
             transformed_features = torch.zeros(
@@ -140,33 +145,35 @@ class MultiGAT(nn.Module):
         self.f_in = f_in
         self.f_out = f_out
         self.num_layers = num_layers
-        self.GATlayers = []
+        self.GATlayers = nn.ModuleList()
+        self.sigmoid = nn.Sigmoid()
         for i in range(num_layers):
             self.GATlayers.append(MultiGATLayer(
-                f_in, f_out, num_heads).to(device))
+                f_in, f_out, num_heads))
             f_in = f_out*num_heads
-        self.att_activation = nn.LeakyReLU(0.1)
-        self.sigmoid = nn.Sigmoid()
+            if (i<num_layers):
+                self.GATlayers.append(nn.LeakyReLU(0.2))
 
     def forward(self, adjlist, features):
         hidden_features = features
-        for i in range(self.num_layers):
-            hidden_features = self.GATlayers[i](adjlist, hidden_features)
-            if(i < self.num_layers):
-                hidden_features = self.att_activation(hidden_features)
+        for layer in self.GATlayers:
+            try:
+                hidden_features=layer(adjlist, hidden_features)
+            except:
+                hidden_features=layer(hidden_features)
         output = self.sigmoid(hidden_features.mean(axis=1))
         return output
 
 
 # %%
-model = MultiGAT(93, 40, 4, 6).to(device)
-paralist = []
-for layer in model.GATlayers:
-    for p in layer.a:
-        paralist.append({'params': p.parameters()})
-    for p in layer.W:
-        paralist.append({'params': p.parameters()})
-optimizer = torch.optim.Adam(paralist, lr=0.001)
+model = MultiGAT(93, 30, 4, 4).to(device)
+#paralist = []
+#for layer in model.GATlayers:
+#    for p in layer.a:
+#        paralist.append({'params': p.parameters()})
+#    for p in layer.W:
+#        paralist.append({'params': p.parameters()})
+optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
 
 
 class WeightedBCELoss(nn.Module):
@@ -180,19 +187,19 @@ class WeightedBCELoss(nn.Module):
         return (self.weighted*y_label+1-y_label)*loss
 
 
-criterion = WeightedBCELoss(7.5)
+criterion = WeightedBCELoss(13)
 # %%
 # training
-traininglen = int(len(dataset.timestepidx)*0.6)
-traininglen = 10
-EPOCH = 5
+traininglist = range(10)
+
+EPOCH = 10
 for epoch in range(EPOCH):
     total_positive = 0
     total_negative = 0
     total_true_positive = 0
     total_false_positive = 0
     total_acc = 0
-    for timestep in range(traininglen):
+    for timestep in random.sample(traininglist, len(traininglist)):
         starttime = time.time()
         positive = 0
         negative = 0
@@ -241,10 +248,15 @@ for epoch in range(EPOCH):
             precision = 0
             f1 = 0
         print(
-            f"[{timestep+1}/{traininglen}] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} time={time.time()-starttime:.4f}")
-    precision = total_true_positive/(total_true_positive+total_false_positive)
+            f"[{timestep+1}/{len(traininglist)}] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} time={time.time()-starttime:.4f}")
     recall = total_true_positive/total_positive
-    f1 = 2/(1/precision+1/recall)
+    try:
+        precision = total_true_positive / \
+            (total_true_positive+total_false_positive)
+        f1 = 2/(1/precision+1/recall)
+    except:
+        total_precision = 0
+        total_f1 = 0
     print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
 
 # %%

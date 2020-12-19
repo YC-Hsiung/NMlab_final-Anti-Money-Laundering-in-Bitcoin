@@ -11,8 +11,8 @@ import pandas as pd
 import random
 import os
 from torchsummary import summary
-device = 'cpu'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = 'cpu'
 # %%
 # define dataset
 
@@ -43,7 +43,6 @@ class elliptic_dataset(torch.utils.data.Dataset):
         for idx, Id in enumerate(df["txId"].to_numpy()):
             self.IdToidx[Id] = idx
         label = df["class"].str.replace("unknown", '3')
-        label = label.str.replace("2", '0')
         label = label.astype(np.float).to_numpy()
         self.totalnode = len(label)
         # 1 bad 2 good 3 unknown
@@ -99,39 +98,40 @@ class MultiGATLayer(nn.Module):
         self.f_in = f_in
         self.f_out = f_out
         self.num_heads = num_heads
-        self.W = nn.Linear(f_in, f_out*num_heads)
-        self.a = nn.ModuleList()
+        self.W=nn.ModuleList()
+        self.a=nn.ModuleList()
+        for _ in range(self.num_heads):
+            self.W.append(nn.Linear(f_in, f_out))
         for _ in range(self.num_heads):
             self.a.append(nn.Linear(f_out*2, 1))
         self.leakyrelu = nn.LeakyReLU(0.2)
-        self.softmax = nn.Softmax(dim=0)
+        self.softmax = nn.Softmax()
 
     def forward(self, adjlist, features):
+        output_features = torch.zeros(
+            len(features), self.f_out*self.num_heads, device=device)
         for node in range(len(features)):
-            neighbors = torch.tensor(adjlist[node]+[node])
-            num_neighbors = torch.numel(neighbors)
-            node_features = features[neighbors]
-            attentionkey = torch.chunk(
-                self.W(node_features), self.num_heads, dim=1)
+            neighbors = adjlist[node].copy()
+            neighbors.append(node)
+            node_features = [features[neighbor] for neighbor in neighbors]
+            node_features = torch.stack(node_features).clone().detach().to(device)
+            attentionkey = [self.W[i](node_features)
+                            for i in range(self.num_heads)]
+            transformed_features = torch.zeros(
+                self.num_heads, len(neighbors), self.f_out*2, device=device)
             for k in range(self.num_heads):
-                transformed_features = torch.cat(
-                    (attentionkey[k][-1].repeat(num_neighbors, 1), attentionkey[k]), dim=1)
-
-                att_weights = self.a[k](transformed_features)
-                att_weights = self.softmax(self.leakyrelu(att_weights))
-                temp_output = torch.matmul(
-                    torch.transpose(attentionkey[k], 0, 1), att_weights)
-                if (k == 0):
-                    output = temp_output
-                else:
-                    output = torch.cat((output, temp_output), dim=0)
-
-            if (node == 0):
-                output_features = output
-            else:
-                output_features = torch.cat((output_features, output), dim=1)
-
-        output_features = torch.transpose(output_features, 0, 1)
+                for i in range(len(neighbors)):
+                    row = torch.cat(
+                        [attentionkey[k][-1], attentionkey[k][i]], dim=0)
+                    transformed_features[k, i, :] = row
+            att_weights = [self.leakyrelu(self.a[k](transformed_features[k]))
+                           for k in range(self.num_heads)]
+            att_weights = [self.softmax(torch.transpose(att_weights[k], 0, 1))
+                           for k in range(self.num_heads)]
+            output = [torch.matmul(att_weights[k], attentionkey[k])
+                      for k in range(self.num_heads)]
+            output = torch.cat(output, dim=1)
+            output_features[node] = output
         return output_features
 
 
@@ -151,16 +151,16 @@ class MultiGAT(nn.Module):
             self.GATlayers.append(MultiGATLayer(
                 f_in, f_out, num_heads))
             f_in = f_out*num_heads
-            if (i < num_layers):
+            if (i<num_layers):
                 self.GATlayers.append(nn.LeakyReLU(0.2))
 
     def forward(self, adjlist, features):
         hidden_features = features
         for layer in self.GATlayers:
-            if(str(layer).find("GATLayer") != -1):
-                hidden_features = layer(adjlist, hidden_features)
-            else:
-                hidden_features = layer(hidden_features)
+            try:
+                hidden_features=layer(adjlist, hidden_features)
+            except:
+                hidden_features=layer(hidden_features)
         output = self.sigmoid(hidden_features.mean(axis=1))
         return output
 
@@ -168,7 +168,7 @@ class MultiGAT(nn.Module):
 # %%
 model = MultiGAT(93, 30, 4, 4).to(device)
 #paralist = []
-# for layer in model.GATlayers:
+#for layer in model.GATlayers:
 #    for p in layer.a:
 #        paralist.append({'params': p.parameters()})
 #    for p in layer.W:
@@ -179,20 +179,20 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
 class WeightedBCELoss(nn.Module):
     def __init__(self, weighted):
         super(WeightedBCELoss, self).__init__()
+        self.BCELoss = nn.BCELoss()
         self.weighted = weighted
 
     def forward(self, y_pred, y_label):
-        loss = -self.weighted[1]*y_label * \
-            torch.log(y_pred)-self.weighted[0]*(1-y_label)*torch.log(1-y_pred)
-        return torch.mean(loss)
+        loss = self.BCELoss(y_pred, y_label)
+        return (self.weighted*y_label+1-y_label)*loss
 
 
 # %%
 # training
 traininglist = range(10)
-criterion = WeightedBCELoss([10, 1])
+criterion = WeightedBCELoss(13)
 
-EPOCH = 5
+EPOCH = 30
 for epoch in range(EPOCH):
     total_positive = 0
     total_negative = 0
@@ -214,29 +214,32 @@ for epoch in range(EPOCH):
             end = len(dataset.features)
         output = model(dataset.adjlist[timestep],
                        dataset.features[start:end].to(device))
-        labeled_idx = np.where(dataset.label[timestep] != 3)
-        loss = criterion(output[labeled_idx[0]],
-                         torch.tensor(dataset.label[timestep][labeled_idx], dtype=torch.float32).to(device))
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        # eval
-        output = output.detach().cpu().numpy()
-        positive_idx = np.where(dataset.label[timestep] == 1)
-        positive = positive_idx[0].shape[0]
-        true_positive = np.sum(np.round(
-            output[positive_idx[0]]) == dataset.label[timestep][positive_idx])
-        false_positive = np.sum(
-            np.round(output))-true_positive
-        # negative acc
-        negative = np.sum(dataset.label[timestep] == 0)
-        acc = np.sum(np.round(output) == dataset.label[timestep])
+        for idx, label in enumerate(dataset.label[timestep]):
+            if (label == 1):
+                loss += criterion(output[idx],
+                                  torch.tensor((1), dtype=torch.float32, device=device))
+                positive += 1
+                if(output[idx] >= 0.5):
+                    acc += 1
+                    true_positive += 1
 
+            elif (label == 2):
+                loss += criterion(output[idx],
+                                  torch.tensor((0), dtype=torch.float32, device=device))
+                negative += 1
+                if(output[idx] < 0.5):
+                    acc += 1
+                else:
+                    false_positive += 1
         total_acc += acc
         total_positive += positive
         total_negative += negative
         total_true_positive += true_positive
         total_false_positive += false_positive
+        loss /= negative+positive
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         recall = true_positive/positive
         try:
             precision = true_positive/(true_positive+false_positive)

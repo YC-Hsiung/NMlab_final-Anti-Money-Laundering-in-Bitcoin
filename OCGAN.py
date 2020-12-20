@@ -80,7 +80,8 @@ class elliptic_dataset(dgl.data.DGLDataset):
         for i in range(len(adjlist)):
             self.graphlist.append(dgl.DGLGraph((adjlist[i][0], adjlist[i][1])))
             try:
-                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:self.timestepidx[i+1]]
+                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]
+                    :self.timestepidx[i+1]]
             except IndexError:
                 self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:]
 
@@ -136,7 +137,7 @@ class GAT(nn.Module):
 
 
 # %%
-model = GAT(93, 25, 4, 4).to(device)
+model = GAT(93, 25, 4, 2).to(device)
 # paralist = []
 # for layer in model.GATlayers:
 #    for p in layer.a:
@@ -144,17 +145,6 @@ model = GAT(93, 25, 4, 4).to(device)
 #    for p in layer.W:
 #        paralist.append({'params': p.parameters()})
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-
-class WeightedBCELoss(nn.Module):
-    def __init__(self, weighted):
-        super(WeightedBCELoss, self).__init__()
-        self.weighted = weighted
-
-    def forward(self, y_pred, y_label):
-        loss = -self.weighted[1]*y_label * \
-            torch.log(y_pred)-self.weighted[0]*(1-y_label)*torch.log(1-y_pred)
-        return torch.mean(loss)
 
 
 # %%

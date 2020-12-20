@@ -6,3 +6,6 @@
 93,50,4,3 f1=0.3089 pos_weight=1
 93,50,8,4 f1=0.2311 pos_weight=1
 93,20,2,3 f1=0.2759 pos_weight=1
+93,25,4,3 f1=0.3295 pos_weight=1
+93,25,4,4 f1=0.2669 pos_weight=1
+93,25,4,2 f1=0.1793 pos_weight=1

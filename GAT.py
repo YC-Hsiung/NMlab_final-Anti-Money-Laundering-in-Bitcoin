@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import random
 import os
-from torchsummary import summary
 device = 'cpu'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # %%
@@ -190,7 +189,7 @@ class WeightedBCELoss(nn.Module):
 # %%
 # training
 traininglist = range(10)
-criterion = WeightedBCELoss([10, 1])
+criterion = WeightedBCELoss([7.5, 0.5])
 
 EPOCH = 5
 for epoch in range(EPOCH):

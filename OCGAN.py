@@ -12,6 +12,7 @@ import pandas as pd
 import random
 import os
 import dgl
+from sklearn.metrics import roc_auc_score
 device = 'cpu'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # %%
@@ -80,8 +81,7 @@ class elliptic_dataset(dgl.data.DGLDataset):
         for i in range(len(adjlist)):
             self.graphlist.append(dgl.DGLGraph((adjlist[i][0], adjlist[i][1])))
             try:
-                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]
-                    :self.timestepidx[i+1]]
+                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:self.timestepidx[i+1]]
             except IndexError:
                 self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:]
 
@@ -113,52 +113,131 @@ dataset = elliptic_dataset("dataset/elliptic_bitcoin_dataset")
 
 
 class GAT(nn.Module):
-    def __init__(self, f_in, f_out, num_heads, num_layers):
+    def __init__(self, f_in):
         super(GAT, self).__init__()
         self.f_in = f_in
-        self.f_out = f_out
-        self.num_heads = num_heads
         self.GATlayers = nn.ModuleList()
-        self.sigmoid = nn.Sigmoid()
-        for i in range(num_layers):
-            self.GATlayers.append(GATConv(
-                f_in, f_out, num_heads))
-            f_in = f_out*num_heads
+        self.tanh = nn.Tanh()
+        self.GATlayers.extend([
+            GATConv(f_in, 50, 4),
+            GATConv(50*4, 25, 4),
+            GATConv(100, 25, 2),
+            GATConv(50, 25, 1),
+        ]
+        )
 
     def forward(self, graph, features):
         hidden_features = features
         for layer in self.GATlayers:
             hidden_features = layer(graph, hidden_features)
             hidden_features = hidden_features.reshape(
-                -1, self.f_out*self.num_heads)
+                hidden_features.shape[0], -1)
 
-        output = hidden_features.mean(axis=1)
+        return self.tanh(hidden_features)
+
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super(Decoder, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(25, 50),
+            nn.ReLU(),
+            nn.Linear(50, 100),
+            nn.ReLU(),
+            nn.Linear(100, 200),
+            nn.ReLU(),
+            nn.Linear(200, 93)
+        )
+
+    def forward(self, latent):
+        output = self.fc(latent)
+        return output
+
+
+class LatentDiscriminator(nn.Module):
+    def __init__(self):
+        super(LatentDiscriminator, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(25, 50),
+            nn.ReLU(),
+            nn.Linear(50, 100),
+            nn.ReLU(),
+            nn.Linear(100, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, latent):
+        output = self.fc(latent)
+        return output
+
+
+class VisualDiscriminator(nn.Module):
+    def __init__(self):
+        super(VisualDiscriminator, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(93, 100),
+            nn.ReLU(),
+            nn.Linear(100, 100),
+            nn.ReLU(),
+            nn.Linear(100, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, feature):
+        output = self.fc(feature)
+        return output
+
+
+class Classifier(nn.Module):
+    def __init__(self):
+        super(Classifier, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(93, 100),
+            nn.ReLU(),
+            nn.Linear(100, 100),
+            nn.ReLU(),
+            nn.Linear(100, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, feature):
+        output = self.fc(feature)
         return output
 
 
 # %%
-model = GAT(93, 25, 4, 2).to(device)
+E = GAT(93).to(device)
+D = Decoder().to(device)
+LD = LatentDiscriminator().to(device)
+VD = VisualDiscriminator().to(device)
+C = Classifier().to(device)
 # paralist = []
 # for layer in model.GATlayers:
 #    for p in layer.a:
 #        paralist.append({'params': p.parameters()})
 #    for p in layer.W:
 #        paralist.append({'params': p.parameters()})
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer_E = torch.optim.Adam(E.parameters(), lr=0.001)
+optimizer_D = torch.optim.Adam(D.parameters(), lr=0.001)
+optimizer_LD = torch.optim.Adam(LD.parameters(), lr=0.002)
+optimizer_VD = torch.optim.Adam(VD.parameters(), lr=0.002)
+optimizer_C = torch.optim.Adam(C.parameters(), lr=0.002)
 
 
 # %%
 # training
 traininglist = range(10)
-criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
-
-EPOCH = 1000
+# criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
+criterion = nn.BCELoss()
+criterion_mse = nn.MSELoss()
+EPOCH = 500
 for epoch in range(EPOCH):
     total_positive = 0
     total_negative = 0
     total_true_positive = 0
     total_false_positive = 0
     total_acc = 0
+    auc = 0
     for timestep in random.sample(traininglist, len(traininglist)):
         starttime = time.time()
         positive = 0
@@ -172,26 +251,88 @@ for epoch in range(EPOCH):
             end = dataset.timestepidx[timestep+1]
         except:
             end = len(dataset.features)
-        output = model(dataset.graphlist[timestep].to(device),
-                       dataset.features[start:end].to(device))
-        labeled_idx = torch.where(dataset.label[timestep] != 3)
-        loss = criterion(output[labeled_idx[0]],
-                         dataset.label[timestep][labeled_idx].to(device))
-        optimizer.zero_grad()
+        negative_idx = torch.where(dataset.label[timestep] == 0)
+        # train classfier
+        for p in C.parameters():
+            p.require_grad = True
+        features = dataset.features[start:end].to(device)
+        noise = torch.randn_like(features).to(device)*0.2
+        latent = E(dataset.graphlist[timestep].to(device),
+                   features+noise)[negative_idx]
+        uniform_vector = torch.rand_like(latent, device=device)*2-1
+        loss_c = criterion(C(D(latent).detach()),
+                           torch.ones((latent.shape[0], 1), device=device))
+        loss_c += criterion(C(D(uniform_vector).detach()),
+                            torch.zeros((latent.shape[0], 1), device=device))
+        optimizer_C.zero_grad()
+        loss_c.backward()
+        optimizer_C.step()
+        # train dicriminator
+        for p in LD.parameters():
+            p.require_grad = True
+        for p in VD.parameters():
+            p.require_grad = True
+        loss_LD = criterion(LD(latent), torch.zeros((latent.shape[0], 1), device=device))+criterion(
+            LD(uniform_vector), torch.ones((uniform_vector.shape[0], 1), device=device))
+        loss_VD = criterion(VD(D(uniform_vector).detach()), torch.ones((uniform_vector.shape[0], 1), device=device)) +\
+            criterion(VD(features[negative_idx]), torch.ones(
+                (latent.shape[0], 1), device=device))
+        loss_D = loss_LD+loss_VD
+        optimizer_LD.zero_grad()
+        optimizer_VD.zero_grad()
+        loss_D.backward()
+        optimizer_LD.step()
+        optimizer_VD.step()
+        # informative-negative mining
+        negative_latent = uniform_vector.clone()
+        negative_latent.requires_grad = True
+        for p in D.parameters():
+            p.require_grad = False
+        for p in C.parameters():
+            p.require_grad = False
+        for _ in range(5):
+            loss_neg = criterion(C(D(negative_latent)),
+                                 torch.ones((negative_latent.shape[0], 1), device=device))
+            loss_neg.backward()
+            negative_latent = torch.autograd.Variable(
+                negative_latent + negative_latent.grad.data*0.001, requires_grad=True)
+        for p in D.parameters():
+            p.require_grad = True
+        # train decoder and encoder
+        for p in LD.parameters():
+            p.require_grad = False
+        for p in VD.parameters():
+            p.require_grad = False
+        latent = E(dataset.graphlist[timestep].to(device),
+                   features+noise)[negative_idx]
+        loss_latent = criterion(LD(latent), torch.ones(
+            (latent.shape[0], 1), device=device))
+        loss_visual = criterion(VD(D(negative_latent)), torch.ones(
+            (negative_latent.shape[0], 1), device=device))  # + criterion(
+        # VD(features[negative_idx]), torch.zeros((negative_idx[0].shape[0], 1), device=device))
+        loss_reconstruction = criterion_mse(D(latent), features[negative_idx])
+        loss = loss_latent+loss_visual+loss_reconstruction*10
+        optimizer_D.zero_grad()
+        optimizer_E.zero_grad()
         loss.backward()
-        optimizer.step()
+        optimizer_D.step()
+        optimizer_E.step()
         # eval
-        output = torch.sigmoid(output).detach().cpu()
+        labeled_idx = torch.where(dataset.label[timestep] != 3)
+        threshold = 1
+        with torch.no_grad():
+            output = (D(E(dataset.graphlist[timestep].to(
+                device), features))-features).pow(2).mean(dim=1).detach().cpu()
         positive_idx = torch.where(dataset.label[timestep] == 1)
         positive = float(positive_idx[0].shape[0])
-        true_positive = torch.sum(torch.round(
-            output[positive_idx[0]]) == dataset.label[timestep][positive_idx], dtype=torch.float32)
+        true_positive = torch.sum(
+            (output[positive_idx[0]] > threshold).float() == dataset.label[timestep][positive_idx], dtype=torch.float32)
         false_positive = torch.sum(
-            torch.round(output), dtype=torch.float32)-true_positive
+            output[labeled_idx] > threshold, dtype=torch.float32)-true_positive
         # negative acc
         negative = torch.sum(dataset.label[timestep] == 0)
-        acc = torch.sum(torch.round(output) ==
-                        dataset.label[timestep], dtype=torch.float32)
+        acc = torch.sum((output > threshold)[labeled_idx].float() ==
+                        dataset.label[timestep][labeled_idx], dtype=torch.float32)
 
         total_acc += acc
         total_positive += positive
@@ -207,6 +348,8 @@ for epoch in range(EPOCH):
             f1 = 0
         # print(
         #    f"[{timestep+1}/{len(traininglist)}] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} time={time.time()-starttime:.4f}")
+        auc += roc_auc_score(dataset.label[timestep][labeled_idx].int(),
+                             output[labeled_idx])
     recall = total_true_positive/total_positive
     try:
         precision = total_true_positive / \
@@ -215,10 +358,11 @@ for epoch in range(EPOCH):
     except:
         total_precision = 0
         total_f1 = 0
-    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    #print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} pre={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} auc={auc/len(traininglist):.4f}")
 
 # %%
-torch.save(model, "./models/test_model.bin")
+torch.save(model, "./models/OCGAN_model.bin")
 
 # %%
 model = torch.load("./models/test_model.bin")

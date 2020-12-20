@@ -137,7 +137,7 @@ class GAT(nn.Module):
 
 
 # %%
-model = GAT(93, 25, 4, 2).to(device)
+model = GAT(93, 25, 4, 3).to(device)
 # paralist = []
 # for layer in model.GATlayers:
 #    for p in layer.a:
@@ -187,11 +187,11 @@ for epoch in range(EPOCH):
         true_positive = torch.sum(torch.round(
             output[positive_idx[0]]) == dataset.label[timestep][positive_idx], dtype=torch.float32)
         false_positive = torch.sum(
-            torch.round(output), dtype=torch.float32)-true_positive
+            torch.round(output[labeled_idx]), dtype=torch.float32)-true_positive
         # negative acc
         negative = torch.sum(dataset.label[timestep] == 0)
-        acc = torch.sum(torch.round(output) ==
-                        dataset.label[timestep], dtype=torch.float32)
+        acc = torch.sum(torch.round(output[labeled_idx]) ==
+                        dataset.label[timestep][labeled_idx], dtype=torch.float32)
 
         total_acc += acc
         total_positive += positive

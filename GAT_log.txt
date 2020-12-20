@@ -1,11 +1,2 @@
 1000 epoch
-93,50,4,3 f1=0.2520 pos_weight=10
-93,50,4,6 f1=0.1371 pos_weight=10
-93,50,4,3 f1=0.2946 pos_weight=5
-93,50,4,3 f1=0.3021 pos_weight=7/3
-93,50,4,3 f1=0.3089 pos_weight=1
-93,50,8,4 f1=0.2311 pos_weight=1
-93,20,2,3 f1=0.2759 pos_weight=1
-93,25,4,3 f1=0.3295 pos_weight=1
-93,25,4,4 f1=0.2669 pos_weight=1
-93,25,4,2 f1=0.1793 pos_weight=1
+93,25,4,3 f1=0.9608 pos_weight=1

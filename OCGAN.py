@@ -119,8 +119,7 @@ class GAT(nn.Module):
         self.GATlayers = nn.ModuleList()
         self.tanh = nn.Tanh()
         self.GATlayers.extend([
-            GATConv(f_in, 50, 4),
-            GATConv(50*4, 25, 4),
+            GATConv(f_in, 25, 4),
             GATConv(100, 25, 2),
             GATConv(50, 25, 1),
         ]
@@ -139,19 +138,23 @@ class GAT(nn.Module):
 class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(25, 50),
-            nn.ReLU(),
-            nn.Linear(50, 100),
-            nn.ReLU(),
-            nn.Linear(100, 200),
-            nn.ReLU(),
-            nn.Linear(200, 93)
+        self.GATlayers = nn.ModuleList()
+        self.tanh = nn.Tanh()
+        self.GATlayers.extend([
+            GATConv(25, 25, 2),
+            GATConv(50, 25, 4),
+            GATConv(100, 93, 1, negative_slope=1),
+        ]
         )
 
-    def forward(self, latent):
-        output = self.fc(latent)
-        return output
+    def forward(self, graph, features):
+        hidden_features = features
+        for layer in self.GATlayers:
+            hidden_features = layer(graph, hidden_features)
+            hidden_features = hidden_features.reshape(
+                hidden_features.shape[0], -1)
+
+        return hidden_features
 
 
 class LatentDiscriminator(nn.Module):
@@ -161,6 +164,8 @@ class LatentDiscriminator(nn.Module):
             nn.Linear(25, 50),
             nn.ReLU(),
             nn.Linear(50, 100),
+            nn.ReLU(),
+            nn.Linear(100, 100),
             nn.ReLU(),
             nn.Linear(100, 1),
             nn.Sigmoid()
@@ -174,54 +179,68 @@ class LatentDiscriminator(nn.Module):
 class VisualDiscriminator(nn.Module):
     def __init__(self):
         super(VisualDiscriminator, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(93, 100),
-            nn.ReLU(),
-            nn.Linear(100, 100),
-            nn.ReLU(),
-            nn.Linear(100, 1),
-            nn.Sigmoid()
+        self.GATlayers = nn.ModuleList()
+        self.sigmoid = nn.Sigmoid()
+        self.GATlayers.extend([
+            GATConv(93, 25, 4),
+            GATConv(100, 25, 2),
+            GATConv(50, 25, 1),
+        ]
         )
+        self.fc = nn.Linear(25, 1)
 
-    def forward(self, feature):
-        output = self.fc(feature)
-        return output
+    def forward(self, graph, features):
+        hidden_features = features
+        for layer in self.GATlayers:
+            hidden_features = layer(graph, hidden_features)
+            hidden_features = hidden_features.reshape(
+                hidden_features.shape[0], -1)
+        output = self.fc(hidden_features)
+
+        return self.sigmoid(output)
 
 
 class Classifier(nn.Module):
     def __init__(self):
         super(Classifier, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(93, 100),
-            nn.ReLU(),
-            nn.Linear(100, 100),
-            nn.ReLU(),
-            nn.Linear(100, 1),
-            nn.Sigmoid()
+        self.GATlayers = nn.ModuleList()
+        self.sigmoid = nn.Sigmoid()
+        self.GATlayers.extend([
+            GATConv(93, 25, 4),
+            GATConv(100, 25, 2),
+            GATConv(50, 25, 1),
+        ]
         )
+        self.fc = nn.Linear(25, 1)
 
-    def forward(self, feature):
-        output = self.fc(feature)
-        return output
+    def forward(self, graph, features):
+        hidden_features = features
+        for layer in self.GATlayers:
+            hidden_features = layer(graph, hidden_features)
+            hidden_features = hidden_features.reshape(
+                hidden_features.shape[0], -1)
+        output = self.fc(hidden_features)
+
+        return self.sigmoid(output)
 
 
 # %%
 E = GAT(93).to(device)
 D = Decoder().to(device)
+C = Classifier().to(device)
 LD = LatentDiscriminator().to(device)
 VD = VisualDiscriminator().to(device)
-C = Classifier().to(device)
 # paralist = []
 # for layer in model.GATlayers:
 #    for p in layer.a:
 #        paralist.append({'params': p.parameters()})
 #    for p in layer.W:
 #        paralist.append({'params': p.parameters()})
-optimizer_E = torch.optim.Adam(E.parameters(), lr=0.001)
-optimizer_D = torch.optim.Adam(D.parameters(), lr=0.001)
-optimizer_LD = torch.optim.Adam(LD.parameters(), lr=0.002)
-optimizer_VD = torch.optim.Adam(VD.parameters(), lr=0.002)
-optimizer_C = torch.optim.Adam(C.parameters(), lr=0.002)
+optimizer_E = torch.optim.Adam(E.parameters(), lr=0.002)
+optimizer_D = torch.optim.Adam(D.parameters(), lr=0.002)
+optimizer_LD = torch.optim.Adam(LD.parameters(), lr=0.001)
+optimizer_VD = torch.optim.Adam(VD.parameters(), lr=0.001)
+optimizer_C = torch.optim.Adam(C.parameters(), lr=0.001)
 
 
 # %%
@@ -230,7 +249,7 @@ traininglist = range(10)
 # criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
 criterion = nn.BCELoss()
 criterion_mse = nn.MSELoss()
-EPOCH = 500
+EPOCH = 4500
 for epoch in range(EPOCH):
     total_positive = 0
     total_negative = 0
@@ -252,18 +271,18 @@ for epoch in range(EPOCH):
         except:
             end = len(dataset.features)
         negative_idx = torch.where(dataset.label[timestep] == 0)
+        graph = dataset.graphlist[timestep].to(device)
         # train classfier
         for p in C.parameters():
             p.require_grad = True
         features = dataset.features[start:end].to(device)
         noise = torch.randn_like(features).to(device)*0.2
-        latent = E(dataset.graphlist[timestep].to(device),
-                   features+noise)[negative_idx]
+        latent = E(graph, features+noise)
         uniform_vector = torch.rand_like(latent, device=device)*2-1
-        loss_c = criterion(C(D(latent).detach()),
-                           torch.ones((latent.shape[0], 1), device=device))
-        loss_c += criterion(C(D(uniform_vector).detach()),
-                            torch.zeros((latent.shape[0], 1), device=device))
+        loss_c = criterion(C(graph, D(graph, latent).detach())[negative_idx],
+                           torch.ones((negative_idx[0].shape[0], 1), device=device))
+        loss_c += criterion(C(graph, D(graph, uniform_vector).detach())[negative_idx],
+                            torch.zeros((negative_idx[0].shape[0], 1), device=device))
         optimizer_C.zero_grad()
         loss_c.backward()
         optimizer_C.step()
@@ -272,11 +291,11 @@ for epoch in range(EPOCH):
             p.require_grad = True
         for p in VD.parameters():
             p.require_grad = True
-        loss_LD = criterion(LD(latent), torch.zeros((latent.shape[0], 1), device=device))+criterion(
+        loss_LD = criterion(LD(latent[negative_idx]), torch.zeros((negative_idx[0].shape[0], 1), device=device))+criterion(
             LD(uniform_vector), torch.ones((uniform_vector.shape[0], 1), device=device))
-        loss_VD = criterion(VD(D(uniform_vector).detach()), torch.ones((uniform_vector.shape[0], 1), device=device)) +\
-            criterion(VD(features[negative_idx]), torch.ones(
-                (latent.shape[0], 1), device=device))
+        loss_VD = criterion(VD(graph, D(graph, uniform_vector).detach()), torch.zeros((uniform_vector.shape[0], 1), device=device)) +\
+            criterion(VD(graph, features)[negative_idx], torch.ones(
+                (negative_idx[0].shape[0], 1), device=device))
         loss_D = loss_LD+loss_VD
         optimizer_LD.zero_grad()
         optimizer_VD.zero_grad()
@@ -291,7 +310,7 @@ for epoch in range(EPOCH):
         for p in C.parameters():
             p.require_grad = False
         for _ in range(5):
-            loss_neg = criterion(C(D(negative_latent)),
+            loss_neg = criterion(C(graph, D(graph, negative_latent)),
                                  torch.ones((negative_latent.shape[0], 1), device=device))
             loss_neg.backward()
             negative_latent = torch.autograd.Variable(
@@ -304,13 +323,14 @@ for epoch in range(EPOCH):
         for p in VD.parameters():
             p.require_grad = False
         latent = E(dataset.graphlist[timestep].to(device),
-                   features+noise)[negative_idx]
-        loss_latent = criterion(LD(latent), torch.ones(
-            (latent.shape[0], 1), device=device))
-        loss_visual = criterion(VD(D(negative_latent)), torch.ones(
+                   features+noise)
+        loss_latent = criterion(LD(latent[negative_idx]), torch.ones(
+            (negative_idx[0].shape[0], 1), device=device))
+        loss_visual = criterion(VD(graph, D(graph, negative_latent)), torch.ones(
             (negative_latent.shape[0], 1), device=device))  # + criterion(
         # VD(features[negative_idx]), torch.zeros((negative_idx[0].shape[0], 1), device=device))
-        loss_reconstruction = criterion_mse(D(latent), features[negative_idx])
+        loss_reconstruction = criterion_mse(
+            D(graph, latent)[negative_idx], features[negative_idx])
         loss = loss_latent+loss_visual+loss_reconstruction*10
         optimizer_D.zero_grad()
         optimizer_E.zero_grad()
@@ -321,8 +341,8 @@ for epoch in range(EPOCH):
         labeled_idx = torch.where(dataset.label[timestep] != 3)
         threshold = 1
         with torch.no_grad():
-            output = (D(E(dataset.graphlist[timestep].to(
-                device), features))-features).pow(2).mean(dim=1).detach().cpu()
+            output = (D(graph, E(graph, features)) -
+                      features).pow(2).mean(dim=1).detach().cpu()
         positive_idx = torch.where(dataset.label[timestep] == 1)
         positive = float(positive_idx[0].shape[0])
         true_positive = torch.sum(
@@ -358,8 +378,8 @@ for epoch in range(EPOCH):
     except:
         total_precision = 0
         total_f1 = 0
-    #print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} pre={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
-    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} auc={auc/len(traininglist):.4f}")
+    # print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} pre={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_l={loss_LD:.4f} loss_v={loss_VD:.4f} loss_g={loss:.4f} auc={auc/len(traininglist):.4f}")
 
 # %%
 torch.save(model, "./models/OCGAN_model.bin")

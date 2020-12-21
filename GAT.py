@@ -145,11 +145,52 @@ model = GAT(93, 25, 4, 3).to(device)
 #    for p in layer.W:
 #        paralist.append({'params': p.parameters()})
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+# %%
+
+
+def eval_model(datalist):
+    with torch.no_grad():
+        positive = 0
+        true_positive = 0
+        report_positive = 0
+        negative = 0
+        acc = 0
+        for timestep in datalist:
+            start = dataset.timestepidx[timestep]
+            try:
+                end = dataset.timestepidx[timestep+1]
+            except:
+                end = len(dataset.features)
+            output = model(dataset.graphlist[timestep].to(device),
+                           dataset.features[start:end].to(device))
+            output = torch.sigmoid(output).detach().cpu()
+            labeled_idx = torch.where(dataset.label[timestep] != 3)
+            positive_idx = torch.where(dataset.label[timestep] == 1)
+            positive += float(positive_idx[0].shape[0])
+            true_positive += torch.sum(torch.round(
+                output[positive_idx[0]]) == dataset.label[timestep][positive_idx], dtype=torch.float32)
+            report_positive += torch.sum(
+                torch.round(output[labeled_idx]), dtype=torch.float32)
+            # negative acc
+            negative += torch.sum(dataset.label[timestep] == 0)
+            acc += torch.sum(torch.round(output[labeled_idx]) ==
+                             dataset.label[timestep][labeled_idx], dtype=torch.float32)
+        recall = true_positive/positive
+        try:
+            precision = true_positive/report_positive
+            f1 = 2/(1/precision+1/recall)
+        except:
+            precision = 0
+            f1 = 0
+        print(
+            f"acc={acc/(positive+negative):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
 
 
 # %%
 # training
-traininglist = range(10)
+traininglist = range(30)
+validationlist = range(30, 40)
+testlist = range(40, 49)
 criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
 
 EPOCH = 1000
@@ -216,7 +257,12 @@ for epoch in range(EPOCH):
         total_precision = 0
         total_f1 = 0
     print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
-
+# %%
+# eval
+print("val")
+eval_model(validationlist)
+print("test")
+eval_model(testlist)
 # %%
 torch.save(model, "./models/test_model.bin")
 

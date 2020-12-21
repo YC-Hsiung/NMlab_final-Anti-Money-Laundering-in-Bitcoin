@@ -113,7 +113,7 @@ dataset = elliptic_dataset("dataset/elliptic_bitcoin_dataset")
 
 
 class GAT(nn.Module):
-    def __init__(self, f_in, f_out, num_heads, num_layers):
+    def __init__(self, f_in, f_out, num_heads, num_layers, dropout):
         super(GAT, self).__init__()
         self.f_in = f_in
         self.f_out = f_out
@@ -122,7 +122,7 @@ class GAT(nn.Module):
         self.sigmoid = nn.Sigmoid()
         for i in range(num_layers):
             self.GATlayers.append(GATConv(
-                f_in, f_out, num_heads))
+                f_in, f_out, num_heads, feat_drop=dropout, attn_drop=dropout))
             f_in = f_out*num_heads
 
     def forward(self, graph, features):
@@ -136,15 +136,6 @@ class GAT(nn.Module):
         return output
 
 
-# %%
-model = GAT(93, 25, 4, 3).to(device)
-# paralist = []
-# for layer in model.GATlayers:
-#    for p in layer.a:
-#        paralist.append({'params': p.parameters()})
-#    for p in layer.W:
-#        paralist.append({'params': p.parameters()})
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 # %%
 
 
@@ -184,7 +175,12 @@ def eval_model(datalist):
             f1 = 0
         print(
             f"acc={acc/(positive+negative):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+        return f1
 
+
+# %%
+model = GAT(93, 50, 8, 6, 0.2).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # %%
 # training
@@ -192,7 +188,9 @@ traininglist = range(30)
 validationlist = range(30, 40)
 testlist = range(40, 49)
 criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
-
+plot_train = []
+plot_val = []
+plot_test = []
 EPOCH = 1000
 for epoch in range(EPOCH):
     total_positive = 0
@@ -222,47 +220,18 @@ for epoch in range(EPOCH):
         loss.backward()
         optimizer.step()
         # eval
-        output = torch.sigmoid(output).detach().cpu()
-        positive_idx = torch.where(dataset.label[timestep] == 1)
-        positive = float(positive_idx[0].shape[0])
-        true_positive = torch.sum(torch.round(
-            output[positive_idx[0]]) == dataset.label[timestep][positive_idx], dtype=torch.float32)
-        false_positive = torch.sum(
-            torch.round(output[labeled_idx]), dtype=torch.float32)-true_positive
-        # negative acc
-        negative = torch.sum(dataset.label[timestep] == 0)
-        acc = torch.sum(torch.round(output[labeled_idx]) ==
-                        dataset.label[timestep][labeled_idx], dtype=torch.float32)
-
-        total_acc += acc
-        total_positive += positive
-        total_negative += negative
-        total_true_positive += true_positive
-        total_false_positive += false_positive
-        recall = true_positive/positive
-        try:
-            precision = true_positive/(true_positive+false_positive)
-            f1 = 2/(1/precision+1/recall)
-        except:
-            precision = 0
-            f1 = 0
-        # print(
-        #    f"[{timestep+1}/{len(traininglist)}] loss={loss:.4f} acc={acc/(negative+positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} time={time.time()-starttime:.4f}")
-    recall = total_true_positive/total_positive
-    try:
-        precision = total_true_positive / \
-            (total_true_positive+total_false_positive)
-        f1 = 2/(1/precision+1/recall)
-    except:
-        total_precision = 0
-        total_f1 = 0
-    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    if ((epoch+1) % 50 == 0):
+        print(epoch+1)
+        print("train")
+        plot_train.append(eval_model(traininglist))
+        print("val")
+        plot_val.append(eval_model(validationlist))
+        print("test")
+        plot_test.append(eval_model(testlist))
 # %%
-# eval
-print("val")
-eval_model(validationlist)
-print("test")
-eval_model(testlist)
+plt.plot(plot_train)
+plt.plot(plot_val)
+plt.plot(plot_test)
 # %%
 torch.save(model, "./models/test_model.bin")
 

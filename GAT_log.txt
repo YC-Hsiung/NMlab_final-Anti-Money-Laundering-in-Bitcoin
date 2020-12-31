@@ -1,2 +1,2 @@
 1000 epoch
-93,25,4,3 f1=0.9608 pos_weight=1
+93,50,8,6 pos_weight=3 f1=0.9147,0.7067,0.4819 thresholde 0.2

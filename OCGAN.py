@@ -81,7 +81,7 @@ class elliptic_dataset(dgl.data.DGLDataset):
         for i in range(len(adjlist)):
             self.graphlist.append(dgl.DGLGraph((adjlist[i][0], adjlist[i][1])))
             try:
-                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:self.timestepidx[i+1]]
+                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]                                                                :self.timestepidx[i+1]]
             except IndexError:
                 self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:]
 
@@ -100,16 +100,6 @@ class elliptic_dataset(dgl.data.DGLDataset):
 # %%
 dataset = elliptic_dataset("dataset/elliptic_bitcoin_dataset")
 # %%
-# create collate_fn
-
-
-# create dataloaders
-# dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle = True)
-# %%
-# define model
-
-
-# %%
 
 
 class GAT(nn.Module):
@@ -119,8 +109,8 @@ class GAT(nn.Module):
         self.GATlayers = nn.ModuleList()
         self.tanh = nn.Tanh()
         self.GATlayers.extend([
-            GATConv(f_in, 25, 4),
-            GATConv(100, 25, 2),
+            GATConv(f_in, 25, 4, activation=nn.ReLU()),
+            GATConv(100, 25, 2, activation=nn.ReLU()),
             GATConv(50, 25, 1),
         ]
         )
@@ -141,11 +131,12 @@ class Decoder(nn.Module):
         self.GATlayers = nn.ModuleList()
         self.tanh = nn.Tanh()
         self.GATlayers.extend([
-            GATConv(25, 25, 2),
-            GATConv(50, 25, 4),
-            GATConv(100, 93, 1, negative_slope=1),
+            GATConv(25, 10, 4, activation=nn.ReLU()),
+            GATConv(40, 25, 4, activation=nn.ReLU()),
+            GATConv(100, 50, 1, activation=nn.ReLU()),
         ]
         )
+        self.fc = nn.Linear(50, 93)
 
     def forward(self, graph, features):
         hidden_features = features
@@ -154,7 +145,7 @@ class Decoder(nn.Module):
             hidden_features = hidden_features.reshape(
                 hidden_features.shape[0], -1)
 
-        return hidden_features
+        return self.fc(hidden_features)
 
 
 class LatentDiscriminator(nn.Module):
@@ -182,12 +173,12 @@ class VisualDiscriminator(nn.Module):
         self.GATlayers = nn.ModuleList()
         self.sigmoid = nn.Sigmoid()
         self.GATlayers.extend([
-            GATConv(93, 25, 4),
-            GATConv(100, 25, 2),
-            GATConv(50, 25, 1),
+            GATConv(93, 25, 4, activation=nn.ReLU()),
+            GATConv(100, 25, 2, activation=nn.ReLU()),
+            GATConv(50, 25, 1, activation=nn.ReLU()),
         ]
         )
-        self.fc = nn.Linear(25, 1)
+        self.fc = nn.Sequential(nn.Linear(25, 1), nn.Sigmoid())
 
     def forward(self, graph, features):
         hidden_features = features
@@ -197,7 +188,7 @@ class VisualDiscriminator(nn.Module):
                 hidden_features.shape[0], -1)
         output = self.fc(hidden_features)
 
-        return self.sigmoid(output)
+        return output
 
 
 class Classifier(nn.Module):
@@ -236,11 +227,11 @@ VD = VisualDiscriminator().to(device)
 #        paralist.append({'params': p.parameters()})
 #    for p in layer.W:
 #        paralist.append({'params': p.parameters()})
-optimizer_E = torch.optim.Adam(E.parameters(), lr=0.002)
-optimizer_D = torch.optim.Adam(D.parameters(), lr=0.002)
+optimizer_E = torch.optim.Adam(E.parameters(), lr=0.001)
+optimizer_D = torch.optim.Adam(D.parameters(), lr=0.001)
 optimizer_LD = torch.optim.Adam(LD.parameters(), lr=0.001)
 optimizer_VD = torch.optim.Adam(VD.parameters(), lr=0.001)
-optimizer_C = torch.optim.Adam(C.parameters(), lr=0.001)
+#optimizer_C = torch.optim.Adam(C.parameters(), lr=0.001)
 
 
 # %%
@@ -249,7 +240,7 @@ traininglist = range(10)
 # criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
 criterion = nn.BCELoss()
 criterion_mse = nn.MSELoss()
-EPOCH = 4500
+EPOCH = 5000
 for epoch in range(EPOCH):
     total_positive = 0
     total_negative = 0
@@ -270,15 +261,16 @@ for epoch in range(EPOCH):
             end = dataset.timestepidx[timestep+1]
         except:
             end = len(dataset.features)
-        negative_idx = torch.where(dataset.label[timestep] == 0)
+        negative_idx = torch.where(dataset.label[timestep] != 1)
         graph = dataset.graphlist[timestep].to(device)
-        # train classfier
-        for p in C.parameters():
-            p.require_grad = True
         features = dataset.features[start:end].to(device)
         noise = torch.randn_like(features).to(device)*0.2
         latent = E(graph, features+noise)
         uniform_vector = torch.rand_like(latent, device=device)*2-1
+        # train classfier
+        '''
+        for p in C.parameters():
+            p.require_grad = True
         loss_c = criterion(C(graph, D(graph, latent).detach())[negative_idx],
                            torch.ones((negative_idx[0].shape[0], 1), device=device))
         loss_c += criterion(C(graph, D(graph, uniform_vector).detach())[negative_idx],
@@ -286,16 +278,20 @@ for epoch in range(EPOCH):
         optimizer_C.zero_grad()
         loss_c.backward()
         optimizer_C.step()
-        # train dicriminator
+        '''
+        # train discriminator
         for p in LD.parameters():
             p.require_grad = True
         for p in VD.parameters():
             p.require_grad = True
-        loss_LD = criterion(LD(latent[negative_idx]), torch.zeros((negative_idx[0].shape[0], 1), device=device))+criterion(
+        loss_LD = criterion(LD(latent[negative_idx]).detach(), torch.zeros((negative_idx[0].shape[0], 1), device=device))+criterion(
             LD(uniform_vector), torch.ones((uniform_vector.shape[0], 1), device=device))
+        # loss_LD = -LD(uniform_vector).mean()+LD(latent[negative_idx]).mean()
         loss_VD = criterion(VD(graph, D(graph, uniform_vector).detach()), torch.zeros((uniform_vector.shape[0], 1), device=device)) +\
             criterion(VD(graph, features)[negative_idx], torch.ones(
                 (negative_idx[0].shape[0], 1), device=device))
+        # loss_VD = -VD(graph, features)[negative_idx].mean(
+        # )+VD(graph, D(graph, uniform_vector).detach()).mean()
         loss_D = loss_LD+loss_VD
         optimizer_LD.zero_grad()
         optimizer_VD.zero_grad()
@@ -303,18 +299,24 @@ for epoch in range(EPOCH):
         optimizer_LD.step()
         optimizer_VD.step()
         # informative-negative mining
+        '''
         negative_latent = uniform_vector.clone()
         negative_latent.requires_grad = True
         for p in D.parameters():
             p.require_grad = False
         for p in C.parameters():
             p.require_grad = False
+        
+        optimizer_n = torch.optim.Adam([negative_latent], lr=0.001)
         for _ in range(5):
             loss_neg = criterion(C(graph, D(graph, negative_latent)),
-                                 torch.ones((negative_latent.shape[0], 1), device=device))
+                                 torch.zeros((negative_latent.shape[0], 1), device=device))
+            optimizer_n.zero_grad()
             loss_neg.backward()
-            negative_latent = torch.autograd.Variable(
-                negative_latent + negative_latent.grad.data*0.001, requires_grad=True)
+            # negative_latent = torch.autograd.Variable(
+            #    negative_latent + negative_latent.grad.data*0.001, requires_grad=True)
+            optimizer_n.step()
+        '''
         for p in D.parameters():
             p.require_grad = True
         # train decoder and encoder
@@ -322,13 +324,12 @@ for epoch in range(EPOCH):
             p.require_grad = False
         for p in VD.parameters():
             p.require_grad = False
-        latent = E(dataset.graphlist[timestep].to(device),
-                   features+noise)
+        latent = E(dataset.graphlist[timestep].to(device), features+noise)
         loss_latent = criterion(LD(latent[negative_idx]), torch.ones(
             (negative_idx[0].shape[0], 1), device=device))
-        loss_visual = criterion(VD(graph, D(graph, negative_latent)), torch.ones(
-            (negative_latent.shape[0], 1), device=device))  # + criterion(
-        # VD(features[negative_idx]), torch.zeros((negative_idx[0].shape[0], 1), device=device))
+        # loss_latent = -LD(latent[negative_idx]).mean()
+        loss_visual = criterion(VD(graph, D(graph, uniform_vector)), torch.ones(
+            (uniform_vector.shape[0], 1), device=device))
         loss_reconstruction = criterion_mse(
             D(graph, latent)[negative_idx], features[negative_idx])
         loss = loss_latent+loss_visual+loss_reconstruction*10
@@ -378,7 +379,7 @@ for epoch in range(EPOCH):
     except:
         total_precision = 0
         total_f1 = 0
-    # print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_d={loss_D:.4f} loss_g={loss:.4f} pre={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+    loss_c = 0
     print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} mse={loss_reconstruction:.4f} loss_c={loss_c:.4f} loss_l={loss_LD:.4f} loss_v={loss_VD:.4f} loss_g={loss:.4f} auc={auc/len(traininglist):.4f}")
 
 # %%

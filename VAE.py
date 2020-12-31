@@ -12,6 +12,7 @@ import pandas as pd
 import random
 import os
 import dgl
+from sklearn.metrics import roc_auc_score
 device = 'cpu'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # %%
@@ -80,7 +81,7 @@ class elliptic_dataset(dgl.data.DGLDataset):
         for i in range(len(adjlist)):
             self.graphlist.append(dgl.DGLGraph((adjlist[i][0], adjlist[i][1])))
             try:
-                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:self.timestepidx[i+1]]
+                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]                                                                :self.timestepidx[i+1]]
             except IndexError:
                 self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:]
 
@@ -99,141 +100,160 @@ class elliptic_dataset(dgl.data.DGLDataset):
 # %%
 dataset = elliptic_dataset("dataset/elliptic_bitcoin_dataset")
 # %%
-# create collate_fn
-
-
-# create dataloaders
-# dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle = True)
 # %%
 # define model
 
 
-# %%
-
-
 class GAT(nn.Module):
-    def __init__(self, f_in, f_out, num_heads, num_layers, feat_drop, attn_drop):
+    def __init__(self, f_in):
         super(GAT, self).__init__()
         self.f_in = f_in
-        self.f_out = f_out
-        self.num_heads = num_heads
         self.GATlayers = nn.ModuleList()
-        #self.sigmoid = nn.Sigmoid()
-        self.fc = nn.Sequential(
-            nn.Linear(self.f_out*self.num_heads, 10),
-            nn.ReLU(),
-            nn.Linear(10, 1),
-            # nn.Sigmoid(),
+        self.GATlayers.extend([
+            GATConv(f_in, 20, 4),
+            GATConv(80, 25, 2),
+            GATConv(50, 10, 1)
+        ]
         )
-        for i in range(num_layers):
-            self.GATlayers.append(GATConv(
-                f_in, f_out, num_heads, feat_drop=feat_drop, attn_drop=attn_drop, activation=nn.Sigmoid()))
-            f_in = f_out*num_heads
 
     def forward(self, graph, features):
         hidden_features = features
         for layer in self.GATlayers:
             hidden_features = layer(graph, hidden_features)
             hidden_features = hidden_features.reshape(
-                -1, self.f_out*self.num_heads)
-        output = self.fc(hidden_features).squeeze()
-        return output
+                hidden_features.shape[0], -1)
 
+        return hidden_features
+
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super(Decoder, self).__init__()
+        self.GATlayers = nn.ModuleList()
+        self.tanh = nn.Tanh()
+        self.GATlayers.extend([
+            GATConv(10, 10, 4),
+            GATConv(40, 20, 4),
+            GATConv(80, 93, 1),
+        ]
+        )
+
+    def forward(self, graph, features):
+        hidden_features = features
+        for layer in self.GATlayers:
+            hidden_features = layer(graph, hidden_features)
+            hidden_features = hidden_features.reshape(
+                hidden_features.shape[0], -1)
+
+        return hidden_features
 
 # %%
 
 
-def eval_model(datalist):
-    with torch.no_grad():
-        model.eval()
-        positive = 0
-        true_positive = 0
-        report_positive = 0
-        negative = 0
-        acc = 0
-        for timestep in datalist:
-            start = dataset.timestepidx[timestep]
-            try:
-                end = dataset.timestepidx[timestep+1]
-            except:
-                end = len(dataset.features)
-            output = model(dataset.graphlist[timestep].to(device),
-                           dataset.features[start:end].to(device))
-            output = torch.sigmoid(output).detach().cpu()
-            less_confidence_idx = torch.where(abs(output-0.5) <= 0.2)
-            output[less_confidence_idx] = 1
-            labeled_idx = torch.where(dataset.label[timestep] != 3)
-            positive_idx = torch.where(dataset.label[timestep] == 1)
-            positive += float(positive_idx[0].shape[0])
-            true_positive += torch.sum(torch.round(
-                output[positive_idx[0]]) == dataset.label[timestep][positive_idx], dtype=torch.float32)
-            report_positive += torch.sum(
-                torch.round(output[labeled_idx]), dtype=torch.float32)
-            # negative acc
-            negative += torch.sum(dataset.label[timestep] == 0)
-            acc += torch.sum(torch.round(output[labeled_idx]) ==
-                             dataset.label[timestep][labeled_idx], dtype=torch.float32)
-        recall = true_positive/positive
+def eval_model(evallist):
+    total_acc = 0
+    total_positive = 0
+    total_negative = 0
+    total_false_positive = 0
+    total_true_positive = 0
+    auc = 0
+    for timestep in evallist:
+        start = dataset.timestepidx[timestep]
         try:
-            precision = true_positive/report_positive
-            f1 = 2/(1/precision+1/recall)
+            end = dataset.timestepidx[timestep+1]
         except:
-            precision = 0
-            f1 = 0
-        print(
-            f"acc={acc/(positive+negative):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
-        model.train()
-        return f1
+            end = len(dataset.features)
+        graph = dataset.graphlist[timestep].to(device)
+        features = dataset.features[start:end].to(device)
+        labeled_idx = torch.where(dataset.label[timestep] != 3)
+        threshold = 1
+        with torch.no_grad():
+            output = (D(graph, E(graph, features)) -
+                      features).pow(2).mean(dim=1).detach().cpu()
+        positive_idx = torch.where(dataset.label[timestep] == 1)
+        positive = float(positive_idx[0].shape[0])
+        true_positive = torch.sum(
+            (output[positive_idx[0]] > threshold).float() == dataset.label[timestep][positive_idx], dtype=torch.float32)
+        false_positive = torch.sum(
+            output[labeled_idx] > threshold, dtype=torch.float32)-true_positive
+        # negative acc
+        negative = torch.sum(dataset.label[timestep] == 0)
+        acc = torch.sum((output > threshold)[labeled_idx].float() ==
+                        dataset.label[timestep][labeled_idx], dtype=torch.float32)
+
+        total_acc += acc
+        total_positive += positive
+        total_negative += negative
+        total_true_positive += true_positive
+        total_false_positive += false_positive
+        auc += roc_auc_score(dataset.label[timestep][labeled_idx].int(),
+                             output[labeled_idx])
+    recall = total_true_positive/total_positive
+    try:
+        precision = total_true_positive / \
+            (total_true_positive+total_false_positive)
+        f1 = 2/(1/precision+1/recall)
+    except:
+        precision = 0
+        f1 = 0
+    print(f"[{epoch+1}/{EPOCH}] acc={total_acc/(total_negative+total_positive):.4f} loss={loss:.4f} auc={auc/len(evallist):.4f} f1={f1:.4f}")
 
 
 # %%
-model = GAT(93, 50, 8, 6, 0.2, 0.2).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+E = GAT(93).to(device)
+D = Decoder().to(device)
+optimizer_E = torch.optim.Adam(E.parameters(), lr=0.001)
+optimizer_D = torch.optim.Adam(D.parameters(), lr=0.001)
+
 
 # %%
 # training
 traininglist = range(30)
 validationlist = range(30, 40)
 testlist = range(40, 49)
-criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.])).to(device)
-plot_train = []
-plot_val = []
-plot_test = []
-EPOCH = 1000
+# criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
+criterion = nn.BCELoss()
+criterion_mse = nn.MSELoss()
+EPOCH = 5000
 for epoch in range(EPOCH):
+    total_positive = 0
+    total_negative = 0
+    total_true_positive = 0
+    total_false_positive = 0
+    total_acc = 0
+    auc = 0
     for timestep in random.sample(traininglist, len(traininglist)):
         starttime = time.time()
+        positive = 0
+        negative = 0
+        true_positive = 0
+        false_positive = 0
+        loss = 0
+        acc = 0
         start = dataset.timestepidx[timestep]
         try:
             end = dataset.timestepidx[timestep+1]
         except:
             end = len(dataset.features)
-        output = model(dataset.graphlist[timestep].to(device),
-                       dataset.features[start:end].to(device))
-        labeled_idx = torch.where(dataset.label[timestep] != 3)
-        loss = criterion(output[labeled_idx[0]],
-                         dataset.label[timestep][labeled_idx].to(device))
-        optimizer.zero_grad()
+        graph = dataset.graphlist[timestep].to(device)
+        features = dataset.features[start:end].to(device)
+        noise = torch.randn_like(features).to(device)*0.2
+        output = D(graph, E(graph, features+noise))
+        loss = criterion_mse(output, features)
+        optimizer_D.zero_grad()
+        optimizer_E.zero_grad()
         loss.backward()
-        optimizer.step()
-        print(f"\r loss={loss:.4f}", end="")
-        # eval
-    if ((epoch+1) % 10 == 0):
-        print(epoch+1)
-        print("train")
-        plot_train.append(eval_model(traininglist))
-        print("val")
-        plot_val.append(eval_model(validationlist))
-        print("test")
-        plot_test.append(eval_model(testlist))
-# %%
-plt.plot(plot_train)
-plt.plot(plot_val)
-plt.plot(plot_test)
-# %%
-torch.save(model, "./models/test_model.bin")
+        optimizer_D.step()
+        optimizer_E.step()
+    # eval
+    if (epoch % 50 == 0):
+        eval_model(traininglist)
+        eval_model(validationlist)
+        eval_model(testlist)
 
 # %%
-model = torch.load("./models/test_model.bin")
+#torch.save(model, "./models/OCGAN_model.bin")
+
 # %%
+#model = torch.load("./models/test_model.bin")
 # %%

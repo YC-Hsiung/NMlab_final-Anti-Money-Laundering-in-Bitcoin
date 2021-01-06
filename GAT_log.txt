@@ -1,2 +1,29 @@
 1000 epoch
-93,50,8,6 pos_weight=3 f1=0.9147,0.7067,0.4819 thresholde 0.2
+93,50,8,6 pos_weight=3 f1=0.9147,0.7067,0.4819 threshold 0.2
+
+cofidence
+all data 93,10,4,3,0.2,0.2 pos_weight=10 f1=0.7800,0.5645,0.3425 threshold=0.9 auc=0.8804,0.8390,0.7179
+all data 93,50,8,3,0.2,0.2 pos_weight=10 f1=0.9272,0.6141,0.4034 threshold=0.9 auc=0.8671,0.8724,0.5896
+all data 93,50,10,4,0.3,0.3 pos_weight=10 f1=0.9105,0.6487,0.4881 threshold=0.9 auc=0.9264,0.8321,0.5983 ,20 epoch 0.9355 0.8918 0.7540
+all data 93,15,16,4,0.3,0.3 pos_weight=10 f1=0.8911,0.7011,0.4914 threshold=0.9 auc=0.9701,0.8819,0.6208 
+
+pos_weight=30
+loss_c/6
+93,15,16,4,0.3,0.3
+900
+train
+acc=0.9412 precision=0.6519 recall=0.9966 f1=0.7882 auc=0.9832
+val
+acc=0.8088 precision=0.3559 recall=0.9082 f1=0.5113 auc=0.8979
+test
+acc=0.8350 precision=0.1876 recall=0.6431 f1=0.2905 auc=0.6556
+
+140 epoch 0.9659,0.9249,0.7975
+93,15,16,4,0.4,0.4
+100
+train
+acc=0.8162 precision=0.3718 recall=0.9770 f1=0.5386 auc=0.9466
+val
+acc=0.5339 precision=0.1886 recall=0.9784 f1=0.3162 auc=0.8913
+test
+acc=0.5419 precision=0.0972 recall=0.9313 f1=0.1760 auc=0.7948

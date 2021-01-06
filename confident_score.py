@@ -46,11 +46,12 @@ class elliptic_dataset(dgl.data.DGLDataset):
         self.IdToidx = {}
         for idx, Id in enumerate(df["txId"].to_numpy()):
             self.IdToidx[Id] = idx
-        label = df["class"].str.replace("unknown", '3')
+        label = df["class"]
         label = label.str.replace("2", '0')
+        label = label.str.replace("unknown", '2')
         label = label.astype(np.float).to_numpy()
         self.totalnode = len(label)
-        # 1 bad 2 good 3 unknown
+        # 1 bad 0 good 3 unknown
         self.label = []
         for idx in range(len(self.timestepidx)):
             if(idx < len(self.timestepidx)-1):
@@ -81,7 +82,7 @@ class elliptic_dataset(dgl.data.DGLDataset):
         for i in range(len(adjlist)):
             self.graphlist.append(dgl.DGLGraph((adjlist[i][0], adjlist[i][1])))
             try:
-                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]                                                                :self.timestepidx[i+1]]
+                self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:self.timestepidx[i+1]]
             except IndexError:
                 self.graphlist[i].ndata['feat'] = self.features[self.timestepidx[i]:]
 
@@ -114,7 +115,7 @@ class GAT(nn.Module):
             nn.Linear(self.f_out*self.num_heads, 10),
             nn.ReLU(),
             nn.Linear(10, 1),
-            nn.Sigmoid(),
+            # nn.Sigmoid(),
         )
         self.fc_confidence = nn.Sequential(
             nn.Linear(self.f_out*self.num_heads, 10),
@@ -148,6 +149,8 @@ def eval_model(datalist):
         positive = 0
         true_positive = 0
         report_positive = 0
+        confidence_true_positive = 0
+        confidence_report_positive = 0
         negative = 0
         acc = 0
         auc = 0
@@ -159,42 +162,52 @@ def eval_model(datalist):
                 end = len(dataset.features)
             output, confidence = model(dataset.graphlist[timestep].to(device),
                                        dataset.features[start:end].to(device))
-            output = output.detach().cpu()
             confidence = confidence.detach().cpu()
-            threshold = 0.999
-            #output = torch.sigmoid(output).detach().cpu()
+            output = output.detach().cpu()
+            output = torch.sigmoid(output).detach().cpu()
             labels = dataset.label[timestep]
-            labeled_idx = torch.where(labels != 3)
-            less_confidence_idx = torch.where(
-                confidence < threshold)
-            output[less_confidence_idx] = 1
+            labeled_idx = torch.where(labels != 2)
+
             positive_idx = torch.where(labels == 1)
             positive += float(positive_idx[0].shape[0])
             true_positive += torch.sum(torch.round(
                 output[positive_idx[0]]).squeeze() == labels[positive_idx].squeeze(), dtype=torch.float32)
-            report_positive += torch.sum(
-                torch.round(output[labeled_idx]), dtype=torch.float32)
             # negative acc
+            report_positive += torch.sum(torch.round(
+                output[labeled_idx]), dtype=torch.float32)
             negative += torch.sum(labels == 0)
             acc += torch.sum(torch.round(output[labeled_idx]).squeeze() ==
                              labels[labeled_idx].squeeze(), dtype=torch.float32)
             auc += roc_auc_score(labels[labeled_idx].squeeze().int(),
-                                 confidence[labeled_idx].squeeze())
+                                 1-confidence[labeled_idx].squeeze())
+            # by confidence score
+            threshold = 0.8
+            less_confidence_idx = torch.where(confidence < threshold)
+            confidence_prediction = torch.zeros_like(confidence)
+            confidence_prediction[less_confidence_idx] = 1
+            confidence_true_positive += torch.sum(
+                confidence_prediction[positive_idx].squeeze() == labels[positive_idx].squeeze(), dtype=torch.float32)
+            confidence_report_positive += torch.sum(
+                confidence_prediction, dtype=torch.float32)
         recall = true_positive/positive
+        confidence_recall = confidence_true_positive/positive
         try:
             precision = true_positive/report_positive
             f1 = 2/(1/precision+1/recall)
+            confidence_precision = confidence_true_positive/confidence_report_positive
+            confidence_f1 = 2/(1/confidence_precision+1/confidence_recall)
         except:
             precision = 0
             f1 = 0
+            confidence_precision = 0
+            confidence_f1 = 0
         print(
-            f"acc={acc/(positive+negative):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} auc={auc/len(datalist):.4f}")
+            f"acc={acc/(positive+negative):.4f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} auc={auc/len(datalist):.4f} c_pre={confidence_precision:.4f} c_rec={confidence_recall:.4f} c_f1={confidence_f1:.4f}")
         model.train()
-        return f1
 
 
 # %%
-model = GAT(93, 50, 4, 3, 0.3, 0.3).to(device)
+model = GAT(93, 40, 16, 4, 0.3, 0.3).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # %%
@@ -202,26 +215,15 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 traininglist = range(30)
 validationlist = range(30, 40)
 testlist = range(40, 49)
-#criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.])).to(device)
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.])).to(device)
+# criterion = nn.BCELoss()
 plot_train = []
 plot_val = []
 plot_test = []
-EPOCH = 1000
+EPOCH = 500
 for epoch in range(EPOCH):
-    total_positive = 0
-    total_negative = 0
-    total_true_positive = 0
-    total_false_positive = 0
-    total_acc = 0
     for timestep in random.sample(traininglist, len(traininglist)):
         starttime = time.time()
-        positive = 0
-        negative = 0
-        true_positive = 0
-        false_positive = 0
-        loss = 0
-        acc = 0
         start = dataset.timestepidx[timestep]
         try:
             end = dataset.timestepidx[timestep+1]
@@ -229,32 +231,42 @@ for epoch in range(EPOCH):
             end = len(dataset.features)
         output, confidence = model(dataset.graphlist[timestep].to(device),
                                    dataset.features[start:end].to(device))
-        labeled_idx = torch.where(dataset.label[timestep] != 3)
-        labels = dataset.label[timestep][labeled_idx].to(device)
+        labeled_idx = torch.where(dataset.label[timestep] != 2)
+        # labels = dataset.label[timestep][labeled_idx].to(device)
+        labels = torch.tensor(
+            dataset.label[timestep][labeled_idx], device=device)
+        #labels[labeled_idx] = 0
         output_ = confidence[labeled_idx].squeeze()*output[labeled_idx].squeeze() + \
             (1-confidence[labeled_idx].squeeze())*labels.squeeze()
+        # output_ = confidence.squeeze()*output.squeeze() + \
+        #    (1-confidence.squeeze())*labels.squeeze()
         loss_t = criterion(output_, labels)
-        loss_c = -torch.log(confidence).mean()
+        loss_c = -torch.log(confidence[labeled_idx]).mean()/3
+        #loss_c = -torch.log(confidence+1e-6).mean()/3
         loss = loss_t+loss_c
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         print(f'\r loss_t={loss_t:.4f} loss_c={loss_c:.4f}', end='')
         # eval
-    if ((epoch+1) % 10 == 0):
+    if ((epoch+1) % 20 == 0):
+        print('')
         print(epoch+1)
         print("train")
-        plot_train.append(eval_model(traininglist))
+        eval_model(traininglist)
         print("val")
-        plot_val.append(eval_model(validationlist))
+        eval_model(validationlist)
         print("test")
-        plot_test.append(eval_model(testlist))
+        eval_model(testlist)
 # %%
-plt.plot(plot_train)
-plt.plot(plot_val)
-plt.plot(plot_test)
+print("train")
+eval_model(traininglist)
+print("val")
+eval_model(validationlist)
+print("test")
+eval_model(testlist)
 # %%
-torch.save(model, "./models/test_model.bin")
+torch.save(model, "./models/confidence_model.bin")
 
 # %%
 model = torch.load("./models/test_model.bin")

@@ -231,7 +231,7 @@ optimizer_E = torch.optim.Adam(E.parameters(), lr=0.001)
 optimizer_D = torch.optim.Adam(D.parameters(), lr=0.001)
 optimizer_LD = torch.optim.Adam(LD.parameters(), lr=0.001)
 optimizer_VD = torch.optim.Adam(VD.parameters(), lr=0.001)
-#optimizer_C = torch.optim.Adam(C.parameters(), lr=0.001)
+optimizer_C = torch.optim.Adam(C.parameters(), lr=0.001)
 
 
 # %%
@@ -268,7 +268,7 @@ for epoch in range(EPOCH):
         latent = E(graph, features+noise)
         uniform_vector = torch.rand_like(latent, device=device)*2-1
         # train classfier
-        '''
+
         for p in C.parameters():
             p.require_grad = True
         loss_c = criterion(C(graph, D(graph, latent).detach())[negative_idx],
@@ -278,7 +278,7 @@ for epoch in range(EPOCH):
         optimizer_C.zero_grad()
         loss_c.backward()
         optimizer_C.step()
-        '''
+
         # train discriminator
         for p in LD.parameters():
             p.require_grad = True
@@ -299,14 +299,14 @@ for epoch in range(EPOCH):
         optimizer_LD.step()
         optimizer_VD.step()
         # informative-negative mining
-        '''
+
         negative_latent = uniform_vector.clone()
         negative_latent.requires_grad = True
         for p in D.parameters():
             p.require_grad = False
         for p in C.parameters():
             p.require_grad = False
-        
+
         optimizer_n = torch.optim.Adam([negative_latent], lr=0.001)
         for _ in range(5):
             loss_neg = criterion(C(graph, D(graph, negative_latent)),
@@ -316,7 +316,7 @@ for epoch in range(EPOCH):
             # negative_latent = torch.autograd.Variable(
             #    negative_latent + negative_latent.grad.data*0.001, requires_grad=True)
             optimizer_n.step()
-        '''
+
         for p in D.parameters():
             p.require_grad = True
         # train decoder and encoder

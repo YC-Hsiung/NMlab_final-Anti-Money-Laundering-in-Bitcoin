@@ -181,7 +181,7 @@ def eval_model(datalist):
             auc += roc_auc_score(labels[labeled_idx].squeeze().int(),
                                  1-confidence[labeled_idx].squeeze())
             # by confidence score
-            threshold = 0.8
+            threshold = 0.95
             less_confidence_idx = torch.where(confidence < threshold)
             confidence_prediction = torch.zeros_like(confidence)
             confidence_prediction[less_confidence_idx] = 1
@@ -215,7 +215,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 traininglist = range(30)
 validationlist = range(30, 40)
 testlist = range(40, 49)
-criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.])).to(device)
+criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.])).to(device)
 # criterion = nn.BCELoss()
 plot_train = []
 plot_val = []
@@ -241,7 +241,7 @@ for epoch in range(EPOCH):
         # output_ = confidence.squeeze()*output.squeeze() + \
         #    (1-confidence.squeeze())*labels.squeeze()
         loss_t = criterion(output_, labels)
-        loss_c = -torch.log(confidence[labeled_idx]).mean()/3
+        loss_c = -torch.log(confidence[labeled_idx]).mean()/10
         #loss_c = -torch.log(confidence+1e-6).mean()/3
         loss = loss_t+loss_c
         optimizer.zero_grad()
